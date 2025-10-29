@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>Английский для детей (MVP)</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 16px; }
+      .box { max-width: 480px; margin: 0 auto; border: 1px solid #ddd; border-radius: 10px; padding: 16px; }
+      button { padding: 10px 14px; border-radius: 8px; border: 1px solid #ccc; background: #f7f7f7; cursor: pointer; }
+      button.recording { background: #ffefef; border-color: #ff8a8a; }
+      .row { display: flex; gap: 8px; align-items: center; }
+      .mt8 { margin-top: 8px; }
+      .mt16 { margin-top: 16px; }
+      .label { font-size: 14px; color: #444; }
+      .bubble { background: #f1f4ff; padding: 10px 12px; border-radius: 10px; }
+      audio { width: 100%; margin-top: 8px; }
+      .small { font-size: 12px; color: #666; }
+    </style>
+  </head>
+  <body>
+    <div class="box">
+      <div class="label">Тьютор</div>
+      <div id="tutorText" class="bubble">Загрузка первого вопроса…</div>
+      <audio id="tutorAudio" controls></audio>
+
+      <div class="mt16 label">Ваш ответ</div>
+      <div id="childText" class="bubble" style="background:#f7f7f7;color:#333;">—</div>
+
+      <div class="mt16 row">
+        <button id="recordBtn">Нажмите и говорите</button>
+        <span class="small">до 5 секунд</span>
+      </div>
+
+      <div class="mt8 small">
+        Если спросит разрешение — разрешите доступ к микрофону.
+      </div>
+    </div>
+
+    <script>
+      const API_BASE = '';
+      const recordBtn = document.getElementById('recordBtn');
+      const tutorTextEl = document.getElementById('tutorText');
+      const tutorAudio = document.getElementById('tutorAudio');
+      const childTextEl = document.getElementById('childText');
+
+      const sessionId = (crypto?.randomUUID?.() || (Date.now().toString(36) + Math.random().toString(36).slice(2)));
+      initFirstQuestion();
+
+      async function initFirstQuestion() {
+        try {
+          const r = await fetch(API_BASE + '/api/tutor', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ childText: '', sessionId })
+          });
+          const data = await r.json();
+          if (data?.tutorText) tutorTextEl.textContent = data.tutorText;
+          if (data?.ttsAudioBase64) {
+            tutorAudio.src = `data:${data.audioMimeType || 'audio/mpeg'};base64,${data.ttsAudioBase64}`;
+            tutorAudio.play().catch(()=>{});
+          }
+        } catch (e) {
+          tutorTextEl.textContent = 'Ошибка загрузки. Обновите страницу.';
+        }
+      }
+
+      let mediaRecorder; let chunks = [];
+      recordBtn.addEventListener('click', async () => {
+        try {
+          if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+            await startRecording();
+          } else if (mediaRecorder.state === 'recording') {
+            stopRecording();
+          }
+        } catch (e) {
+          alert('Не удалось получить доступ к микрофону.');
+          console.error(e);
+        }
+      });
+
+      async function startRecording() {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+        chunks = [];
+        mediaRecorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+        mediaRecorder.onstop = onStop;
+        mediaRecorder.start();
+        recordBtn.textContent = 'Запись… нажмите чтобы остановить';
+        recordBtn.classList.add('recording');
+        setTimeout(() => { if (mediaRecorder && mediaRecorder.state === 'recording') stopRecording(); }, 5000);
+      }
+
+      function stopRecording() { try { mediaRecorder.stop(); } catch {} recordBtn.textContent = 'Обработка…'; }
+
+      async function onStop() {
+        recordBtn.classList.remove('recording');
+        try {
+          const blob = new Blob(chunks, { type: 'audio/webm' });
+          const base64 = await blobToBase64(blob);
+
+          const sttRes = await fetch(API_BASE + '/api/stt', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ audioBase64: base64, mimeType: blob.type })
+          });
+          const sttData = await sttRes.json();
+          const text = (sttData?.text || '').trim();
+          childTextEl.textContent = text || '—';
+
+          const tutorRes = await fetch(API_BASE + '/api/tutor', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ childText: text, sessionId })
+          });
+          const tData = await tutorRes.json();
+          tutorTextEl.textContent = tData?.tutorText || '—';
+          if (tData?.ttsAudioBase64) {
+            tutorAudio.src = `data:${tData.audioMimeType || 'audio/mpeg'};base64,${tData.ttsAudioBase64}`;
+            tutorAudio.play().catch(()=>{});
+          }
+        } catch (e) {
+          console.error(e);
+          tutorTextEl.textContent = 'Ошибка. Попробуйте ещё раз.';
+        } finally {
+          recordBtn.textContent = 'Нажмите и говорите';
+        }
+      }
+
+      function blobToBase64(blob) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const dataUrl = reader.result;
+            const base64 = (dataUrl.split(',')[1] || '');
+            resolve(base64);
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      }
+    </script>
+  </body>
+</html>
